@@ -1,53 +1,44 @@
-# app.py ✅ FULL WORKING: Offline Hindi STT (Vosk) + Predefined QA (qa.json) + Hindi TTS (eSpeak-NG)
-# Includes: ✅ anti-echo lock + queue flush + cooldown + short-text ignore
-#
-# Run (from src folder):  py app.py
-# Stop: Ctrl + C
-
 import json
 import os
 import queue
 import re
 import subprocess
+import threading
 import time
+import tkinter as tk
 
 import sounddevice as sd
 from vosk import Model, KaldiRecognizer
 
 # ---------- Paths ----------
-MODEL_PATH = "../models/vosk-model-small-hi-0.22"
-QA_PATH = "../qa.json"
+MODEL_PATH = r"C:\Users\ashik\Downloads\ps1-offline-hindi-voice-assistant-main\ps1-offline-hindi-voice-assistant-main\models\vosk-model-small-hi-0.22"
+QA_PATH = r"C:\Users\ashik\Downloads\ps1-offline-hindi-voice-assistant-main\ps1-offline-hindi-voice-assistant-main\src\qa.json"
 ESPEAK = r"C:\Program Files\eSpeak NG\espeak-ng.exe"
 
 SAMPLE_RATE = 16000
 q = queue.Queue()
 
-# Echo control
-LISTENING = True
-COOLDOWN_SECONDS = 1.2  # increase to 1.5 if still looping
-IGNORE_IF_UNDER_CHARS = 3  # ignore tiny recognitions like "हां" / noise
+# State
+RUNNING = False
+LISTENING = False
+COOLDOWN_SECONDS = 1.2
+IGNORE_IF_UNDER_CHARS = 3
 
 
 # ---------- Helpers ----------
-def normalize(text: str) -> str:
+def normalize(text):
     text = text.strip().lower()
     text = re.sub(r"\s+", " ", text)
-    # keep Hindi range + word chars/spaces, drop punctuation/symbols
-    text = re.sub(r"[^\w\s\u0900-\u097F]", "", text)
-    return text
+    return re.sub(r"[^\w\s\u0900-\u097F]", "", text)
 
 
-def load_qa(path: str) -> dict:
+def load_qa(path):
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
-    fixed = {}
-    for k, v in data.items():
-        fixed[normalize(k)] = v
-    return fixed
+    return {normalize(k): v for k, v in data.items()}
 
 
 def flush_queue():
-    """Remove any buffered mic audio so we don't process assistant's own speech after TTS."""
     try:
         while True:
             q.get_nowait()
@@ -55,104 +46,140 @@ def flush_queue():
         pass
 
 
-def speak(text: str):
-    """Offline Hindi TTS using eSpeak-NG with UTF-8 file input."""
-    global LISTENING
-    if not text:
-        return
+def update_status(msg, color):
+    status_label.config(text=f"● {msg}", fg=color)
 
-    # 1) Stop listening + flush any queued audio
+
+def speak(text):
+    global LISTENING
     LISTENING = False
+    update_status("Speaking", "orange")
     flush_queue()
 
-    # Write text to temp UTF-8 file (avoids console encoding issues)
     tmp = os.path.join(os.environ.get("TEMP", "."), "tts_hi.txt")
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(text)
 
-    # Speak (tune for clarity)
     subprocess.run(
         [ESPEAK, "-v", "hi", "-s", "105", "-p", "55", "-a", "180", "-f", tmp],
         check=False,
     )
 
-    # 2) Cooldown: let speaker sound die out
     time.sleep(COOLDOWN_SECONDS)
-
-    # 3) Flush again (some audio can still be in buffer)
     flush_queue()
-
     LISTENING = True
+    update_status("Listening", "green")
 
 
 def callback(indata, frames, time_info, status):
-    # Always push audio to queue; we decide later whether to ignore it
     q.put(bytes(indata))
 
 
-# ---------- Main ----------
-def main():
-    if not os.path.exists(MODEL_PATH):
-        print("ERROR: Model folder not found:", os.path.abspath(MODEL_PATH))
-        return
-
-    if not os.path.exists(QA_PATH):
-        print("ERROR: qa.json not found:", os.path.abspath(QA_PATH))
-        return
-
-    if not os.path.exists(ESPEAK):
-        print("ERROR: eSpeak-NG not found at:", ESPEAK)
-        return
+# ---------- Voice Thread ----------
+def voice_loop():
+    global RUNNING, LISTENING
 
     qa = load_qa(QA_PATH)
-
-    print("Loading Hindi model...")
     model = Model(MODEL_PATH)
     rec = KaldiRecognizer(model, SAMPLE_RATE)
 
-    print("\nSpeak in Hindi. Press Ctrl+C to stop.\n")
+    LISTENING = True
+    update_status("Listening", "green")
 
-    try:
-        with sd.RawInputStream(
-            samplerate=SAMPLE_RATE,
-            blocksize=8000,
-            dtype="int16",
-            channels=1,
-            callback=callback,
-        ):
-            while True:
-                data = q.get()
+    with sd.RawInputStream(
+        samplerate=SAMPLE_RATE,
+        blocksize=8000,
+        dtype="int16",
+        channels=1,
+        callback=callback,
+    ):
+        while RUNNING:
+            data = q.get()
 
-                # Ignore mic data while speaking/cooldown
-                if not LISTENING:
+            if not LISTENING:
+                continue
+
+            if rec.AcceptWaveform(data):
+                result = json.loads(rec.Result())
+                text = result.get("text", "").strip()
+                if not text:
                     continue
 
-                if rec.AcceptWaveform(data):
-                    result = json.loads(rec.Result())
-                    text = (result.get("text") or "").strip()
-                    if not text:
-                        continue
+                key = normalize(text)
+                if len(key) < IGNORE_IF_UNDER_CHARS:
+                    continue
 
-                    key = normalize(text)
+                input_box.delete("1.0", tk.END)
+                input_box.insert(tk.END, text)
 
-                    # Ignore tiny/noisy outputs (often from echo)
-                    if len(key) < IGNORE_IF_UNDER_CHARS:
-                        continue
+                reply = None
+                for qq, a in qa.items():
+                   if qq in key or key in qq:
+                      reply = a
+                      break
 
-                    print("You said:", text)
-
-                    reply = qa.get(key)
-                    if reply:
-                        print("Assistant:", reply)
-                        speak(reply)
-                    else:
-                        fallback = "माफ कीजिए, इसका जवाब मेरे पास अभी नहीं है।"
-                        print("Assistant:", fallback)
-                        speak(fallback)
-
-    except KeyboardInterrupt:
-        print("\nStopped.")
+                if reply is None:
+                   reply = "माफ कीजिए, इसका जवाब मेरे पास अभी नहीं है।"
 
 
-if __name__ == "__main__":
-    main()
+                output_box.delete("1.0", tk.END)
+                output_box.insert(tk.END, reply)
+                speak(reply)
+
+    update_status("Stopped", "red")
+
+
+# ---------- UI Actions ----------
+def start_listening():
+    global RUNNING
+    if RUNNING:
+        return
+    RUNNING = True
+    threading.Thread(target=voice_loop, daemon=True).start()
+
+
+def stop_listening():
+    global RUNNING, LISTENING
+    RUNNING = False
+    LISTENING = False
+    flush_queue()
+    update_status("Stopped", "red")
+
+
+# ---------- GUI ----------
+root = tk.Tk()
+root.title("Offline Hindi Voice Assistant")
+root.geometry("780x560")
+root.resizable(False, False)
+
+title = tk.Label(root, text="Offline Hindi Voice Assistant",
+                 font=("Segoe UI", 16, "bold"))
+title.pack(pady=10)
+
+status_label = tk.Label(root, text="● Idle", font=("Segoe UI", 11), fg="gray")
+status_label.pack(pady=5)
+
+btn_frame = tk.Frame(root)
+btn_frame.pack(pady=10)
+
+tk.Button(btn_frame, text="▶ START", width=14,
+          font=("Segoe UI", 11), command=start_listening).pack(side=tk.LEFT, padx=20)
+
+tk.Button(btn_frame, text="⏹ STOP", width=14,
+          font=("Segoe UI", 11), command=stop_listening).pack(side=tk.LEFT, padx=20)
+
+# Input Section
+tk.Label(root, text="You Said (Live Input)",
+         font=("Segoe UI", 12, "bold")).pack(anchor="w", padx=20)
+
+input_box = tk.Text(root, height=4, font=("Segoe UI", 12), wrap=tk.WORD)
+input_box.pack(fill="x", padx=20, pady=5)
+
+# Output Section
+tk.Label(root, text="Assistant Reply (Live Output)",
+         font=("Segoe UI", 12, "bold")).pack(anchor="w", padx=20, pady=(10, 0))
+
+output_box = tk.Text(root, height=5, font=("Segoe UI", 12), wrap=tk.WORD)
+output_box.pack(fill="x", padx=20, pady=5)
+
+root.mainloop()
