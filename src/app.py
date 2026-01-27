@@ -61,7 +61,7 @@ def speak(text):
         f.write(text)
 
     subprocess.run(
-        [ESPEAK, "-v", "hi", "-s", "105", "-p", "55", "-a", "180", "-f", tmp],
+         [ESPEAK, "-v","hi","-s","145","-p","40","-a","170","-g","10","-f", tmp],
         check=False,
     )
 
