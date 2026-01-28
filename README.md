@@ -8,4 +8,4 @@ Offline, privacy-preserving Hindi voice assistant built for the Bharat AI-SoC St
 4) Install eSpeak-NG (Windows x64)
 5) Run:
    cd src
-   py app.py
+   python app.py
